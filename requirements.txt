@@ -3,3 +3,4 @@ uvicorn
 retell-sdk
 twilio
 python-dotenv
+pipecat-ai[websocket]
