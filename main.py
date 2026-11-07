@@ -32,7 +32,7 @@ DB_PATH = os.getenv("DB_PATH", "orders.db")
 twilio = TwilioClient(os.environ["TWILIO_SID"], os.environ["TWILIO_TOKEN"])
 app = FastAPI()
 
-
+'''
 # ---------- database ----------
 def db():
     conn = sqlite3.connect(DB_PATH)
@@ -97,3 +97,4 @@ def format_sms(restaurant_name, customer_name, phone, order_type, items, notes):
     return "\n".join(lines)
 
 
+'''
