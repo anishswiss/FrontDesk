@@ -19,7 +19,7 @@ from twilio.rest import Client as TwilioClient
 from pipecat.adapters.llm.schemas.function_schema import FunctionSchema
 from pipecat.adapters.llm.schemas.tools_schema import ToolsSchema
 from pipecat.audio.vad.silero import SileroVADAnalyzer
-from pipecat.frames.frames import LLMRunFrame
+from pipecat.frames.frames import LLMRunFrame,TTSSpeakFrame, EndFrame
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.worker import PipelineParams, PipelineWorker
 from pipecat.processors.aggregators.llm_context import LLMContext
@@ -41,7 +41,7 @@ from pipecat.transports.websocket.fastapi import (
 )
 from pipecat.workers.runner import WorkerRunner
 
-from business.orders import get_menu_text, get_restaurant, save_order
+from business.orders import get_menu_text, get_restaurant, get_restaurant_with_menu_text, save_order
 
 load_dotenv(override=True)
 
@@ -77,19 +77,22 @@ ORDER_TOOL = FunctionSchema(
 
 
 def build_prompt(restaurant, menu_text) -> str:
-    if restaurant is None:  # unknown number: fail politely
+    if menu_text is None and restaurant["menu"] is None:  # unknown number: fail politely
         return (
             "You are an automated phone assistant. Apologize that you cannot take "
             "orders right now, ask the caller to try again later, and say goodbye."
         )
-    menu_text = menu_text or restaurant["menu"] or "(menu not loaded)"
-    return f"""You are the automated phone assistant for {restaurant['name']}.
+    menu_text = menu_text or restaurant["menu"]
+    return f"""You are the automated phone assistant for an Indian Restaurant : {restaurant['name']}.
 The restaurant is busy and cannot answer, so you take orders for them.
 Your words are spoken aloud: use short sentences, no lists, no special characters.
 
-At the start, say you are an automated assistant and the restaurant is busy.
+The caller has already heard your greeting and has not given their name yet. Do not repeat the greeting.
 
-MENU (only offer these items, never invent items or prices):
+MENU (Only describe a dish using words from the menu above. Never guess what a dish is.
+If the caller asks for something that is not on the menu, say it is not on the menu,
+and name the closest items exactly as listed, without calling them something else.):
+
 {menu_text}
 
 Collect: the customer's name, pickup or delivery, and each item with quantity and changes.
@@ -102,17 +105,19 @@ will follow up. Keep every reply to one or two short sentences."""
 
 async def run_bot(transport, restaurant, menu_text, inbound_number, customer_number, call_sid):
 
-    menu_keywords = [
+    menu_keyterms = [
         "dosa:3", "masala:3", "podi:3", "uthappam:3", 
         "mysore:2", "andhra karam:2", "paneer:2"
     ]
+
+    menu_keyterms = restaurant.__getitem__("speech_hints")
     
     stt = DeepgramSTTService(api_key=os.getenv("DEEPGRAM_API_KEY"),
                               settings=DeepgramSTTService.Settings(
                                  model="nova-3",
                                 language="en",
                                 smart_format=True,
-                                keyterm=menu_keywords
+                                keyterm=menu_keyterms
                               ))
     tts = CartesiaTTSService(
         api_key=os.getenv("CARTESIA_API_KEY"),
@@ -130,8 +135,7 @@ async def run_bot(transport, restaurant, menu_text, inbound_number, customer_num
     llm.register_function("submit_order", submit_order)
 
     messages = [
-        {"role": "system", "content": build_prompt(restaurant, menu_text)},
-        {"role": "system", "content": "Greet the caller now."},
+        {"role": "system", "content": build_prompt(restaurant, menu_text)}
     ]
     context = LLMContext(messages, ToolsSchema(standard_tools=[ORDER_TOOL]))
     user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
@@ -154,12 +158,30 @@ async def run_bot(transport, restaurant, menu_text, inbound_number, customer_num
         params=PipelineParams(          # phone audio is 8 kHz
             audio_in_sample_rate=8000,
             audio_out_sample_rate=8000,
+            enable_metrics=True,
         ),
     )
 
+    if restaurant: # number found in your database
+        short_name = restaurant["name"].split("|")[0].strip()
+        greeting = (
+            f"Hello, this is the automated assistant for {short_name}. "
+            "The restaurant is busy right now, but I can take your order. "
+            "May I have your name, please?"
+        )
+    else:  # number NOT in your database
+        greeting = (
+            "Hello. I'm sorry, I can't take orders right now. "
+            "Please try again later. Goodbye."
+        )
+
     @transport.event_handler("on_client_connected")
-    async def on_connected(transport, client):
-        await task.queue_frames([LLMRunFrame()])  # makes the bot speak first
+    async def on_connected(transport, client):        
+        if restaurant:
+            await task.queue_frames([TTSSpeakFrame(greeting, append_to_context=True)])
+        else:
+            # unknown number: apologize, then end the call
+            await task.queue_frames([TTSSpeakFrame(greeting), EndFrame()])
 
     @transport.event_handler("on_client_disconnected")
     async def on_disconnected(transport, client):
@@ -186,12 +208,15 @@ async def bot(runner_args: RunnerArguments):
     logger.info(f"Call {call_sid}: to={inbound_number} from={customer_number}")
 
     # Database calls are blocking, so run them in a thread to keep call audio smooth.
+    '''
     restaurant = await asyncio.to_thread(get_restaurant, inbound_number)
     menu_text = ""
     if restaurant is None:
         logger.error(f"No restaurant configured for {inbound_number}")
     else:
         menu_text = await asyncio.to_thread(get_menu_text, restaurant["id"])
+    '''
+    restaurant, menu_text = get_restaurant_with_menu_text(inbound_number)
 
     serializer = TwilioFrameSerializer(
         stream_sid=stream_sid,

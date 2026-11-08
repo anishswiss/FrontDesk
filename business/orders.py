@@ -125,6 +125,52 @@ def get_menu_text(restaurant_id: int) -> str:
     return "\n".join(lines).strip()
 
 
+
+def get_restaurant_with_menu_rows(inbound_number: str):
+    with closing(db()) as c:
+        return c.execute(
+            '''SELECT r.id, r.name, r.menu, r.speech_hints, 
+                      m.available, m.category, m.name as "menu_item_name", 
+                      m.price_cents, m.description   
+               FROM restaurants as r 
+               INNER JOIN menu_items as m ON r.id = m.restaurant_id
+               WHERE r.inbound_number = %s''', (inbound_number,)  # Fixed SQL typo & qualified inbound_number
+        ).fetchall()
+            
+def get_restaurant_with_menu_text(inbound_number: str):
+    restaurant_with_menu_texts = get_restaurant_with_menu_rows(inbound_number)
+
+    # Cleaned up Python conditional expression
+    if not restaurant_with_menu_texts:
+        return {"id": 0}, ""
+    
+    # Fixed item access: changed dot notation (.id) to standard dictionary keys
+    first_row = restaurant_with_menu_texts[0]
+    restaurant = {
+        "id": first_row["id"],
+        "name": first_row["name"],
+        "menu": first_row["menu"],
+        "speech_hints": first_row["speech_hints"],
+    }
+    
+    groups = {}
+    for r in restaurant_with_menu_texts:
+        if r["available"]:
+            groups.setdefault(r["category"] or "Menu", []).append(r)
+            
+    lines = []
+    for cat, rows in groups.items():
+        lines.append(f"{cat}:")
+        for r in rows:
+            line = f"- {r['menu_item_name']} - ${r['price_cents'] / 100:.2f}"
+            if r["description"]:
+                line += f" ({r['description'][:100]})"
+            lines.append(line)
+        lines.append("")
+        
+    return restaurant, "\n".join(lines).strip()
+
+
 # ---------- menu writes ----------
 def save_menu_items(restaurant_id: int, items: list, deactivate_missing: bool = False) -> dict:
     """

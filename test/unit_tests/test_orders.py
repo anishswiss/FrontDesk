@@ -14,6 +14,10 @@ class TestOrders(unittest.TestCase):
         restaurant_id = restaurant.__getitem__("id")
         menu_text = get_menu_text(restaurant_id)
         print(menu_text)
+        menu_keyterms = restaurant.__getitem__("speech_hints")
+        print("Speech Hints")
+        print(menu_keyterms)
+
         
 
 if __name__ == "main":
